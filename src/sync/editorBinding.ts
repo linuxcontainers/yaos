@@ -139,6 +139,14 @@ export class EditorBindingManager {
 			}
 		}
 
+		// Clear cursor from awareness to avoid stale cursor positions
+		// being displayed to other clients after switching files.
+		try {
+			this.vaultSync.provider.awareness.setLocalStateField("cursor", null);
+		} catch {
+			// Provider may be disconnected
+		}
+
 		this.log(`unbind: unbound "${binding.path}" (leaf=${leafId})`);
 	}
 

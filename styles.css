@@ -12,32 +12,53 @@
  *
  * Hidden by default. Shown when body has .vault-crdt-show-cursors
  * (controlled by the "Show remote cursors" setting).
+ *
+ * Class names from y-codemirror.next:
+ *   .cm-ySelection       - selection highlight (inline)
+ *   .cm-yLineSelection   - full-line selection
+ *   .cm-ySelectionCaret  - cursor caret container
+ *   .cm-ySelectionCaretDot - dot on top of caret
+ *   .cm-ySelectionInfo   - name label
  */
 
-.yRemoteSelection {
-	display: none;
-}
-
-.yRemoteSelectionHead {
-	display: none;
+/* Hide by default */
+.cm-ySelection,
+.cm-yLineSelection,
+.cm-ySelectionCaret {
+	display: none !important;
 }
 
 /* When enabled, show cursors with styling */
-.vault-crdt-show-cursors .yRemoteSelection {
-	display: inline;
-	opacity: 0.35;
+.vault-crdt-show-cursors .cm-ySelection {
+	display: inline !important;
+	opacity: 0.4;
 }
 
-.vault-crdt-show-cursors .yRemoteSelectionHead {
-	display: inline;
-	position: absolute;
+.vault-crdt-show-cursors .cm-yLineSelection {
+	display: block !important;
+	opacity: 0.4;
+}
+
+.vault-crdt-show-cursors .cm-ySelectionCaret {
+	display: inline !important;
+	position: relative;
 	border-left: 2px solid;
 	border-color: inherit;
-	height: 100%;
+	margin-left: -1px;
+	margin-right: -1px;
 }
 
-.vault-crdt-show-cursors .yRemoteSelectionHead::after {
-	content: attr(data-name);
+.vault-crdt-show-cursors .cm-ySelectionCaretDot {
+	border-radius: 50%;
+	position: absolute;
+	width: 6px;
+	height: 6px;
+	top: -3px;
+	left: -3px;
+	background-color: inherit;
+}
+
+.vault-crdt-show-cursors .cm-ySelectionInfo {
 	position: absolute;
 	top: -1.4em;
 	left: -2px;
@@ -46,8 +67,9 @@
 	padding: 1px 4px;
 	border-radius: 3px 3px 3px 0;
 	white-space: nowrap;
-	color: var(--text-on-accent);
+	color: white;
 	background-color: inherit;
-	opacity: 0.9;
+	opacity: 1;
+	z-index: 100;
 	pointer-events: none;
 }
