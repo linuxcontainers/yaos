@@ -11,6 +11,18 @@ import {
 /** DO storage key for daily snapshot coordination. */
 const LAST_SNAPSHOT_DAY_KEY = "lastSnapshotDay";
 const LAST_SNAPSHOT_ID_KEY = "lastSnapshotId";
+const DEBUG_TRACE_RING_KEY = "debugTraceRing";
+const MAX_DEBUG_TRACE_EVENTS = 200;
+
+interface ServerTraceEntry {
+	ts: string;
+	event: string;
+	roomId: string;
+	traceId?: string;
+	bootId?: string;
+	deviceName?: string;
+	[key: string]: unknown;
+}
 
 /**
  * PartyKit server for vault CRDT sync.
@@ -34,6 +46,50 @@ export default class VaultSyncServer implements Party.Server {
 
 	constructor(readonly room: Party.Room) {}
 
+	private async recordTrace(
+		event: string,
+		data: Record<string, unknown> = {},
+		context?: { traceId?: string; bootId?: string; deviceName?: string },
+	): Promise<void> {
+		const entry: ServerTraceEntry = {
+			ts: new Date().toISOString(),
+			event,
+			roomId: this.room.id,
+			traceId: context?.traceId,
+			bootId: context?.bootId,
+			deviceName: context?.deviceName,
+			...data,
+		};
+
+		console.log(JSON.stringify({
+			source: "vault-sync",
+			...entry,
+		}));
+
+		try {
+			const existing =
+				(await this.room.storage.get<ServerTraceEntry[]>(DEBUG_TRACE_RING_KEY))
+				?? [];
+			existing.push(entry);
+			if (existing.length > MAX_DEBUG_TRACE_EVENTS) {
+				existing.splice(0, existing.length - MAX_DEBUG_TRACE_EVENTS);
+			}
+			await this.room.storage.put(DEBUG_TRACE_RING_KEY, existing);
+		} catch (err) {
+			console.warn("[vault-sync] debug trace persist failed:", err);
+		}
+	}
+
+	private async handleDebugRecent(): Promise<Response> {
+		const recent =
+			(await this.room.storage.get<ServerTraceEntry[]>(DEBUG_TRACE_RING_KEY))
+			?? [];
+		return json({
+			roomId: this.room.id,
+			recent,
+		});
+	}
+
 	// -------------------------------------------------------------------
 	// WebSocket handler (Yjs sync)
 	// -------------------------------------------------------------------
@@ -42,8 +98,16 @@ export default class VaultSyncServer implements Party.Server {
 		const url = new URL(ctx.request.url);
 		const token = url.searchParams.get("token");
 		const expected = this.room.env.SYNC_TOKEN as string | undefined;
+		const clientTrace = {
+			traceId: url.searchParams.get("trace") ?? undefined,
+			bootId: url.searchParams.get("boot") ?? undefined,
+			deviceName: url.searchParams.get("device") ?? undefined,
+		};
 
 		if (!expected) {
+			void this.recordTrace("ws-rejected", {
+				reason: "server_misconfigured",
+			}, clientTrace);
 			console.error(
 				`[vault-sync] SYNC_TOKEN env var is not set — rejecting connection to room ${this.room.id}`,
 			);
@@ -53,6 +117,9 @@ export default class VaultSyncServer implements Party.Server {
 		}
 
 		if (!token || token !== expected) {
+			void this.recordTrace("ws-rejected", {
+				reason: "unauthorized",
+			}, clientTrace);
 			console.warn(
 				`[vault-sync] Unauthorized connection attempt to room ${this.room.id}`,
 			);
@@ -61,6 +128,10 @@ export default class VaultSyncServer implements Party.Server {
 			return;
 		}
 
+		void this.recordTrace("ws-connected", {
+			cfRay: ctx.request.headers.get("cf-ray") ?? undefined,
+			userAgent: ctx.request.headers.get("user-agent") ?? undefined,
+		}, clientTrace);
 		console.log(
 			`[vault-sync] Client connected to room ${this.room.id}`,
 		);
@@ -76,12 +147,28 @@ export default class VaultSyncServer implements Party.Server {
 	// -------------------------------------------------------------------
 
 	async onRequest(req: Party.Request): Promise<Response> {
-		// Auth: same token-based auth as WebSocket
 		const url = new URL(req.url);
+		const path = url.pathname;
 		const token = url.searchParams.get("token");
 		const expected = this.room.env.SYNC_TOKEN as string | undefined;
+		const clientTrace = {
+			traceId: url.searchParams.get("trace") ?? undefined,
+			bootId: url.searchParams.get("boot") ?? undefined,
+			deviceName: url.searchParams.get("device") ?? undefined,
+		};
+
+		await this.recordTrace("http-request", {
+			method: req.method,
+			path,
+		}, clientTrace);
+
+		// Auth: same token-based auth as WebSocket
 
 		if (!expected || !token || token !== expected) {
+			await this.recordTrace("http-unauthorized", {
+				method: req.method,
+				path,
+			}, clientTrace);
 			return json({ error: "unauthorized" }, 401);
 		}
 
@@ -93,8 +180,9 @@ export default class VaultSyncServer implements Party.Server {
 			return json({ error: "invalid room id" }, 400);
 		}
 
-		// Route based on path suffix
-		const path = url.pathname;
+		if (req.method === "GET" && path.endsWith("/debug/recent")) {
+			return this.handleDebugRecent();
+		}
 
 		// --- Blob endpoints ---
 		const r2 = getR2Config(this.room.env as Record<string, unknown>);
@@ -293,6 +381,14 @@ export default class VaultSyncServer implements Party.Server {
 				`(${index.markdownFileCount} md, ${index.blobFileCount} blobs, ` +
 				`${Math.round(index.crdtSizeBytes / 1024)} KB compressed)`,
 			);
+			await this.recordTrace("snapshot-created", {
+				snapshotId: index.snapshotId,
+				markdownFileCount: index.markdownFileCount,
+				blobFileCount: index.blobFileCount,
+				triggeredBy: body.device,
+			}, {
+				deviceName: body.device,
+			});
 
 			return json({
 				status: "created",
@@ -339,6 +435,14 @@ export default class VaultSyncServer implements Party.Server {
 				`(${index.markdownFileCount} md, ${index.blobFileCount} blobs, ` +
 				`${Math.round(index.crdtSizeBytes / 1024)} KB compressed)`,
 			);
+			await this.recordTrace("snapshot-created-manual", {
+				snapshotId: index.snapshotId,
+				markdownFileCount: index.markdownFileCount,
+				blobFileCount: index.blobFileCount,
+				triggeredBy: body.device,
+			}, {
+				deviceName: body.device,
+			});
 
 			return json({
 				status: "created",
