@@ -18,7 +18,8 @@
  *   .cm-yLineSelection   - full-line selection
  *   .cm-ySelectionCaret  - cursor caret container
  *   .cm-ySelectionCaretDot - dot on top of caret
- *   .cm-ySelectionInfo   - name label
+ *   .cm-ySelectionInfo   - name label (intentionally hidden to avoid
+ *                         looking like inserted document text)
  */
 
 /* Hide by default */
@@ -59,17 +60,5 @@
 }
 
 .vault-crdt-show-cursors .cm-ySelectionInfo {
-	position: absolute;
-	top: -1.4em;
-	left: -2px;
-	font-size: 10px;
-	font-family: var(--font-interface);
-	padding: 1px 4px;
-	border-radius: 3px 3px 3px 0;
-	white-space: nowrap;
-	color: white;
-	background-color: inherit;
-	opacity: 1;
-	z-index: 100;
-	pointer-events: none;
+	display: none !important;
 }
