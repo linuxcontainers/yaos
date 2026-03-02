@@ -93,7 +93,7 @@ export class PersistentTraceLogger {
 			vaultId: options.vaultId,
 		};
 		this.rootDir = normalizePath(
-			`${this.app.vault.configDir}/plugins/vault-crdt-sync/logs`,
+			`${this.app.vault.configDir}/plugins/yaos/logs`,
 		);
 	}
 

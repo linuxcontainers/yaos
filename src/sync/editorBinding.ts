@@ -611,13 +611,13 @@ export class EditorBindingManager {
 		if (this.cmDegradedWarned) return;
 		this.cmDegradedWarned = true;
 		new Notice(
-			"Vault CRDT Sync: Obsidian may have changed an internal editor API. " +
+			"YAOS: Obsidian may have changed an internal editor API. " +
 			"Live collaborative editing is unavailable. Background sync may still continue, " +
 			"but live cursors and editor binding are degraded. Please check for a plugin update.",
 			10000,
 		);
 		console.error(
-			"[vault-crdt-sync] Critical: Could not locate CodeMirror 6 EditorView. Live binding disabled.",
+			"[yaos] Critical: Could not locate CodeMirror 6 EditorView. Live binding disabled.",
 		);
 	}
 
@@ -828,7 +828,7 @@ export class EditorBindingManager {
 	private log(msg: string): void {
 		this.trace?.("editor", msg);
 		if (this.debug) {
-			console.log(`[vault-crdt-sync:editor] ${msg}`);
+			console.log(`[yaos:editor] ${msg}`);
 		}
 	}
 

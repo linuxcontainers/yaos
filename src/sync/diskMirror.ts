@@ -33,7 +33,7 @@ const LOCAL_STRING_ORIGINS = new Set([
  * Determine whether a Yjs transaction origin is local (should NOT trigger
  * a disk write).
  *
- * y-partykit applies remote updates with `transactionOrigin = provider`.
+ * The sync provider applies remote updates with `transactionOrigin = provider`.
  * y-codemirror applies local editor updates with `transactionOrigin = YSyncConfig`.
  *
  * We only treat provider-origin transactions as remote.
@@ -452,7 +452,7 @@ export class DiskMirror {
 				);
 			}
 		} catch (err) {
-			console.error(`[vault-crdt-sync] flushWrite failed for "${path}":`, err);
+			console.error(`[yaos] flushWrite failed for "${path}":`, err);
 		}
 	}
 
@@ -476,7 +476,7 @@ export class DiskMirror {
 				this.log(`handleRemoteDelete: deleted "${path}" from disk`);
 			} catch (err) {
 				console.error(
-					`[vault-crdt-sync] handleRemoteDelete failed for "${path}":`,
+					`[yaos] handleRemoteDelete failed for "${path}":`,
 					err,
 				);
 			}
@@ -631,7 +631,7 @@ export class DiskMirror {
 	private log(msg: string): void {
 		this.trace?.("disk", msg);
 		if (this.debug) {
-			console.log(`[vault-crdt-sync:disk] ${msg}`);
+			console.log(`[yaos:disk] ${msg}`);
 		}
 	}
 
