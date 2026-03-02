@@ -12,6 +12,13 @@ Real-time Obsidian vault sync using [Yjs](https://yjs.dev/) CRDTs and [PartyKit]
 - **Remote cursors** — See where collaborators are editing (optional)
 - **Mobile support** — Works on Android/iOS with reconnection hardening
 
+## Performance
+
+The production bundle is currently about **235 KB raw / 69 KB gzipped** — small enough to stay invisible at startup.
+It keeps that footprint by externalizing Obsidian and CodeMirror, so the shipped code is just the sync engine: Yjs, persistence/network bindings, fast diffing, and snapshot compression.
+
+For the engineering rationale behind the recent hardening work (diff rewrite, persistence serialization, HTTP auth changes, server limits, and known architectural tradeoffs), see **[docs/engineering-notes.md](docs/engineering-notes.md)**.
+
 ## Requirements
 
 - Obsidian 1.5.0+
@@ -66,6 +73,7 @@ After enabling, go to **Settings → Vault CRDT sync**:
 |---------|-------------|
 | **Exclude patterns** | Comma-separated prefixes to skip (e.g., `templates/, .trash/`) |
 | **Max file size** | Skip files larger than this (default 2 MB) |
+| **Max attachment size** | Skip attachments larger than this (default 10 MB) |
 | **External edit policy** | How to handle edits from git/other tools: Always, Only when closed, Never |
 | **Sync attachments** | Enable R2-based sync for non-markdown files |
 | **Show remote cursors** | Display collaborator cursor positions |
@@ -119,15 +127,18 @@ The plugin needs a PartyKit server. See **[server/README.md](server/README.md)**
 - Deploy to your own Cloudflare account
 - R2 bucket setup for attachments and snapshots
 - Secret management and rotation
+- Server-side limits and hardening behavior
 
 ## How it works
 
 1. Each markdown file gets a stable ID and a `Y.Text` CRDT for its content
-2. Edits flow through the Yjs binding to the Y.Doc
-3. The PartyKit server relays updates to all connected devices
-4. Updates are persisted in Durable Object storage (survives server restarts)
-5. Offline edits are stored in IndexedDB and sync on reconnect
-6. Attachments sync separately via content-addressed R2 storage
+2. Today, those per-file `Y.Text` values live inside one shared vault-level `Y.Doc`, which keeps collaboration simple and fast for normal-sized note vaults
+3. Local markdown filesystem events are coalesced by path and drained into the CRDT at I/O speed, so bursty create/modify storms do not trigger one import per event
+4. Live editor edits flow through the Yjs binding to that shared document
+5. The PartyKit server relays updates to all connected devices
+6. Updates are persisted in Durable Object storage (survives server restarts)
+7. Offline edits are stored in IndexedDB and sync on reconnect
+8. Attachments sync separately via content-addressed R2 storage
 
 ## Releasing
 

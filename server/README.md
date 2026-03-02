@@ -157,6 +157,19 @@ HTTP endpoints require `Authorization: Bearer <SYNC_TOKEN>`.
 - `GET /snapshot/list` — List all snapshots for this vault
 - `POST /snapshot/presign-get` — Get download URL for a snapshot
 
+## Operational safeguards
+
+The server includes a few deliberate hardening limits:
+
+- **Blob upload cap**: `/blob/presign-put` rejects uploads larger than **10 MB**
+- **Bounded R2 fan-out**: blob existence checks and snapshot index fetches use a small worker pool instead of unbounded `Promise.all(...)`
+- **Cloudflare-safe concurrency**: the worker pool is intentionally set below the Workers 6-open-connection ceiling to avoid self-inflicted connection pressure
+- **HTTP auth headers**: normal HTTP endpoints use `Authorization: Bearer <token>` instead of query-string tokens
+- **Robust snapshot listing**: R2 XML listing is parsed with a real XML parser, not regex extraction
+- **Safer snapshot IDs**: snapshot suffixes use cryptographic randomness instead of `Math.random()`
+
+These constraints are meant to keep the server predictable under normal personal-use loads, especially on Cloudflare Workers and Durable Objects.
+
 ## Secret management
 
 ### Generating a strong token
