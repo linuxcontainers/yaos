@@ -28,6 +28,7 @@ Passing `SYNC_TOKEN` locally is optional. If you omit it, the server starts uncl
 ## Deploy to Cloudflare
 
 Use the **Deploy to Cloudflare** button above for the default setup. It targets the `server/` subdirectory so Cloudflare treats this folder as the project root.
+This repo intentionally keeps `.env.example` free of assignments so the deploy flow does not prompt for `SYNC_TOKEN` by default.
 
 The local `wrangler.toml` in this directory defines:
 
