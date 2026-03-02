@@ -14,16 +14,14 @@ function assert(condition, name) {
 	}
 }
 
-function fingerprintContent(content) {
+async function fingerprintContent(content) {
 	const bytes = encoder.encode(content);
-	let hash = 2166136261;
-	for (let i = 0; i < bytes.length; i++) {
-		hash ^= bytes[i] ?? 0;
-		hash = Math.imul(hash, 16777619);
-	}
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
 	return {
 		bytes: bytes.length,
-		hash: (hash >>> 0).toString(16).padStart(8, "0"),
+		hash: Array.from(new Uint8Array(digest))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join(""),
 	};
 }
 
@@ -70,12 +68,12 @@ class DiskMirrorHarness {
 		if (existing) {
 			const currentContent = await this.store.read(path);
 			if (currentContent === content) return;
-			this.suppressWrite(path, content);
+			await this.suppressWrite(path, content);
 			await this.store.modify(path, content);
 			return;
 		}
 
-		this.suppressWrite(path, content);
+		await this.suppressWrite(path, content);
 		await this.store.create(path, content);
 	}
 
@@ -87,8 +85,8 @@ class DiskMirrorHarness {
 		return null;
 	}
 
-	suppressWrite(path, content) {
-		const fingerprint = fingerprintContent(content);
+	async suppressWrite(path, content) {
+		const fingerprint = await fingerprintContent(content);
 		this.suppressedPaths.set(path, {
 			kind: "write",
 			expiresAt: Date.now() + SUPPRESS_MS,
@@ -117,7 +115,7 @@ class DiskMirrorHarness {
 
 		try {
 			const content = await this.store.read(file.path);
-			const fingerprint = fingerprintContent(content);
+			const fingerprint = await fingerprintContent(content);
 			if (
 				fingerprint.bytes === entry.expectedBytes
 				&& fingerprint.hash === entry.expectedHash

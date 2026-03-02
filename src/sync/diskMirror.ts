@@ -1,4 +1,4 @@
-import { type App, MarkdownView, TFile, normalizePath } from "obsidian";
+import { type App, arrayBufferToHex, MarkdownView, TFile, normalizePath } from "obsidian";
 import * as Y from "yjs";
 import type { VaultSync } from "./vaultSync";
 import type { EditorBindingManager } from "./editorBinding";
@@ -433,11 +433,11 @@ export class DiskMirror {
 					return;
 				}
 
-				this.suppressWrite(path, content);
+				await this.suppressWrite(path, content);
 				await this.app.vault.modify(existing, content);
 				this.log(`flushWrite: updated "${path}" (${content.length} chars)`);
 			} else {
-				this.suppressWrite(path, content);
+				await this.suppressWrite(path, content);
 				const dir = normalized.substring(0, normalized.lastIndexOf("/"));
 				if (dir) {
 					const dirExists =
@@ -670,10 +670,10 @@ export class DiskMirror {
 		return null;
 	}
 
-	private suppressWrite(path: string, content: string): void {
+	private async suppressWrite(path: string, content: string): Promise<void> {
 		// Record the exact content we wrote so vault modify/create events can
 		// acknowledge our own write by observed state, not just timing.
-		const fingerprint = this.fingerprintContent(content);
+		const fingerprint = await this.fingerprintContent(content);
 		this.suppressedPaths.set(normalizePath(path), {
 			kind: "write",
 			expiresAt: Date.now() + SUPPRESS_MS,
@@ -720,7 +720,7 @@ export class DiskMirror {
 			// Read back the file only when a suppression candidate exists. This
 			// keeps the hot path cheap while making self-event detection causal.
 			const content = await this.app.vault.read(file);
-			const fingerprint = this.fingerprintContent(content);
+			const fingerprint = await this.fingerprintContent(content);
 			if (
 				fingerprint.bytes === entry.expectedBytes
 				&& fingerprint.hash === entry.expectedHash
@@ -738,16 +738,12 @@ export class DiskMirror {
 		return false;
 	}
 
-	private fingerprintContent(content: string): { bytes: number; hash: string } {
+	private async fingerprintContent(content: string): Promise<{ bytes: number; hash: string }> {
 		const bytes = new TextEncoder().encode(content);
-		let hash = 2166136261;
-		for (let i = 0; i < bytes.length; i++) {
-			hash ^= bytes[i] ?? 0;
-			hash = Math.imul(hash, 16777619);
-		}
+		const digest = await crypto.subtle.digest("SHA-256", bytes);
 		return {
 			bytes: bytes.length,
-			hash: (hash >>> 0).toString(16).padStart(8, "0"),
+			hash: arrayBufferToHex(digest),
 		};
 	}
 
