@@ -86,8 +86,21 @@ async function claimServer() {
 	return token;
 }
 
+async function resolveAuthToken(defaultEnvToken) {
+	const capabilitiesRes = await fetch(`${HOST}/api/capabilities`);
+	if (!capabilitiesRes.ok) {
+		throw new Error(`capabilities probe failed (${capabilitiesRes.status})`);
+	}
+	const capabilities = await capabilitiesRes.json();
+	if (capabilities?.claimed === true && capabilities?.authMode === "env") {
+		return defaultEnvToken;
+	}
+	return await claimServer();
+}
+
 async function main() {
 	const persistDir = mkdtempSync(join(tmpdir(), "yaos-wrangler-"));
+	const envToken = randomBytes(32).toString("hex");
 	const wrangler = spawn(
 		WRANGLER_BIN,
 		[
@@ -106,7 +119,12 @@ async function main() {
 		{
 			cwd: resolve("server"),
 			stdio: ["ignore", "pipe", "pipe"],
-			env: process.env,
+			env: {
+				...process.env,
+				CLOUDFLARE_INCLUDE_PROCESS_ENV: "true",
+				CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false",
+				SYNC_TOKEN: envToken,
+			},
 		},
 	);
 	const wranglerExit = new Promise((resolvePromise) => {
@@ -125,7 +143,7 @@ async function main() {
 
 	try {
 		await waitForWorker();
-		const token = await claimServer();
+		const token = await resolveAuthToken(envToken);
 		await runCommand("node", [
 			"--import",
 			"jiti/register",
