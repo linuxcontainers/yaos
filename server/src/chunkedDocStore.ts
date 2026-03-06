@@ -226,6 +226,34 @@ async function deleteKeysBatched(
 	}
 }
 
+async function putChunkedPayloadBatched(
+	target: StorageLike | TransactionLike,
+	bytes: Uint8Array,
+	chunkSizeBytes: number,
+	chunkKeyForIndex: (index: number) => string,
+	maxKeysPerOperation: number,
+): Promise<number> {
+	const chunkCount = bytes.byteLength === 0
+		? 0
+		: Math.ceil(bytes.byteLength / chunkSizeBytes);
+
+	if (chunkCount === 0) return 0;
+
+	for (let chunkStart = 0; chunkStart < chunkCount; chunkStart += maxKeysPerOperation) {
+		const chunkEnd = Math.min(chunkStart + maxKeysPerOperation, chunkCount);
+		const record: Record<string, Uint8Array> = {};
+		for (let i = chunkStart; i < chunkEnd; i++) {
+			const start = i * chunkSizeBytes;
+			const end = Math.min(start + chunkSizeBytes, bytes.byteLength);
+			// subarray avoids eagerly copying chunk bytes into transient arrays.
+			record[chunkKeyForIndex(i)] = bytes.subarray(start, end);
+		}
+		await target.put(record);
+	}
+
+	return chunkCount;
+}
+
 function emptyJournalMeta(now = new Date().toISOString()): JournalMeta {
 	return {
 		format: JOURNAL_META_FORMAT,
@@ -352,17 +380,15 @@ export class ChunkedDocStore {
 				return;
 			}
 			const seq = meta.nextSeq;
-			const chunkCount = bytes.byteLength === 0
-				? 0
-				: Math.ceil(bytes.byteLength / this.chunkSizeBytes);
 			const hash = await sha256Hex(bytes);
 
-			const entries: Array<[string, unknown]> = [];
-			for (let i = 0; i < chunkCount; i++) {
-				const start = i * this.chunkSizeBytes;
-				const end = Math.min(start + this.chunkSizeBytes, bytes.byteLength);
-				entries.push([journalChunkKey(seq, i), bytes.slice(start, end)]);
-			}
+			const chunkCount = await putChunkedPayloadBatched(
+				txn,
+				bytes,
+				this.chunkSizeBytes,
+				(i) => journalChunkKey(seq, i),
+				this.maxKeysPerOperation,
+			);
 
 			const manifest: JournalEntryManifest = {
 				format: JOURNAL_ENTRY_FORMAT,
@@ -373,7 +399,6 @@ export class ChunkedDocStore {
 				sha256: hash,
 				updatedAt: now,
 			};
-			entries.push([journalManifestKey(seq), manifest]);
 			const updatedMeta: JournalMeta = {
 				format: JOURNAL_META_FORMAT,
 				nextSeq: seq + 1,
@@ -381,8 +406,14 @@ export class ChunkedDocStore {
 				totalBytes: meta.totalBytes + bytes.byteLength,
 				updatedAt: now,
 			};
-			entries.push([JOURNAL_META_KEY, updatedMeta]);
-			await putEntriesBatched(txn, entries, this.maxKeysPerOperation);
+			await putEntriesBatched(
+				txn,
+				[
+					[journalManifestKey(seq), manifest],
+					[JOURNAL_META_KEY, updatedMeta],
+				],
+				this.maxKeysPerOperation,
+			);
 		});
 
 		const meta = await this.readJournalMeta(this.storage);
@@ -445,18 +476,16 @@ export class ChunkedDocStore {
 			const newVersion = existingPointer
 				? existingPointer.version + 1
 				: 1;
-			const chunkCount = updateBytes.byteLength === 0
-				? 0
-				: Math.ceil(updateBytes.byteLength / this.chunkSizeBytes);
 			const now = new Date().toISOString();
+			const chunkCount = await putChunkedPayloadBatched(
+				txn,
+				updateBytes,
+				this.chunkSizeBytes,
+				(i) => checkpointChunkKey(newVersion, i),
+				this.maxKeysPerOperation,
+			);
 
 			const entries: Array<[string, unknown]> = [];
-			for (let i = 0; i < chunkCount; i++) {
-				const start = i * this.chunkSizeBytes;
-				const end = Math.min(start + this.chunkSizeBytes, updateBytes.byteLength);
-				entries.push([checkpointChunkKey(newVersion, i), updateBytes.slice(start, end)]);
-			}
-
 			const manifest: CheckpointManifest = {
 				format: CHECKPOINT_FORMAT,
 				version: newVersion,
