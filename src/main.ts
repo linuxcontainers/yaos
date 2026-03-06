@@ -18,6 +18,7 @@ import { isMarkdownSyncable, isBlobSyncable } from "./types";
 import { applyDiffToYText } from "./sync/diff";
 import {
 	type DiskIndex,
+	collectFileStats,
 	filterChangedFiles,
 	updateIndex,
 	moveIndexEntries,
@@ -581,12 +582,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			let allStats: Map<string, { mtime: number; size: number }> = new Map();
 			if (mode === "authoritative") {
 				changed = eligibleFiles;
-				for (const file of eligibleFiles) {
-					const stat = await this.app.vault.adapter.stat(file.path);
-					if (stat) {
-						allStats.set(file.path, { mtime: stat.mtime, size: stat.size });
-					}
-				}
+				allStats = await collectFileStats(this.app, eligibleFiles);
 				skippedByIndex = 0;
 			} else {
 				const indexResult = await filterChangedFiles(

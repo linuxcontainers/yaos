@@ -1,4 +1,5 @@
 import { type App, normalizePath } from "obsidian";
+import { randomBase64Url } from "../utils/base64url";
 
 export interface TraceHttpContext {
 	traceId: string;
@@ -33,25 +34,33 @@ const FLUSH_DELAY_MS = 400;
 const STATE_WRITE_DELAY_MS = 600;
 
 function randomId(prefix: string): string {
-	const bytes = new Uint8Array(10);
-	crypto.getRandomValues(bytes);
-	let b64 = btoa(String.fromCharCode(...bytes));
-	b64 = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-	return `${prefix}-${b64}`;
+	return `${prefix}-${randomBase64Url(10)}`;
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+	if (typeof error === "object" && error !== null && "code" in error) {
+		const code = (error as { code?: unknown }).code;
+		if (code === "EEXIST") return true;
+	}
+	const msg = error instanceof Error ? error.message : String(error);
+	return msg.toLowerCase().includes("exists");
 }
 
 async function ensureDirRecursive(app: App, dir: string): Promise<void> {
 	const normalized = normalizePath(dir);
 	if (!normalized) return;
-	if (await app.vault.adapter.exists(normalized)) return;
 
 	const parts = normalized.split("/").filter(Boolean);
 	let current = "";
 	for (const part of parts) {
 		current = current ? `${current}/${part}` : part;
-		// `exists` is cheaper than catching mkdir errors on repeated writes.
-		if (!(await app.vault.adapter.exists(current))) {
+		try {
 			await app.vault.adapter.mkdir(current);
+		} catch (error) {
+			if (isAlreadyExistsError(error)) continue;
+			// Preserve idempotence across adapters that don't provide rich error codes.
+			if (await app.vault.adapter.exists(current)) continue;
+			throw error;
 		}
 	}
 }

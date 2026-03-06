@@ -7,6 +7,9 @@
  * "_diskIndex" in the plugin's data.json.
  */
 import { type App, TFile, normalizePath } from "obsidian";
+import { mapWithConcurrency } from "../utils/concurrency";
+
+const DEFAULT_STAT_CONCURRENCY = 16;
 
 export interface DiskIndexEntry {
 	/** Last known mtime in ms. */
@@ -68,8 +71,13 @@ export async function filterChangedFiles(
 	const unchanged: TFile[] = [];
 	const allStats = new Map<string, { mtime: number; size: number }>();
 
-	for (const file of mdFiles) {
-		const stat = await statFile(app, file.path);
+	const statResults = await mapWithConcurrency(
+		mdFiles,
+		DEFAULT_STAT_CONCURRENCY,
+		async (file) => ({ file, stat: await statFile(app, file.path) }),
+	);
+
+	for (const { file, stat } of statResults) {
 		if (!stat) {
 			// Can't stat — treat as changed (fall back to read)
 			changed.push(file);
@@ -86,6 +94,30 @@ export async function filterChangedFiles(
 	}
 
 	return { changed, unchanged, allStats };
+}
+
+/**
+ * Collect file stats with bounded concurrency.
+ * Files that fail stat are omitted from the returned map.
+ */
+export async function collectFileStats(
+	app: App,
+	files: TFile[],
+	concurrency = DEFAULT_STAT_CONCURRENCY,
+): Promise<Map<string, { mtime: number; size: number }>> {
+	const stats = await mapWithConcurrency(
+		files,
+		concurrency,
+		async (file) => ({ file, stat: await statFile(app, file.path) }),
+	);
+
+	const out = new Map<string, { mtime: number; size: number }>();
+	for (const { file, stat } of stats) {
+		if (stat) {
+			out.set(file.path, stat);
+		}
+	}
+	return out;
 }
 
 /**

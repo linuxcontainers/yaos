@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type VaultCrdtSyncPlugin from "./main";
+import { randomBase64Url } from "./utils/base64url";
 
 /** Controls how external disk edits (git, other editors) are imported into CRDT. */
 export type ExternalEditPolicy = "always" | "closed-only" | "never";
@@ -63,11 +64,7 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 
 /** Generate a random vault ID (16 bytes, base64url). */
 export function generateVaultId(): string {
-	const bytes = new Uint8Array(16);
-	crypto.getRandomValues(bytes);
-	let b64 = btoa(String.fromCharCode(...bytes));
-	b64 = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-	return b64;
+	return randomBase64Url(16);
 }
 
 /** Returns true if the host URL is unencrypted and not localhost. */
