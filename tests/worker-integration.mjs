@@ -166,6 +166,9 @@ async function main() {
 			"jiti/register",
 			"tests/snapshots.ts",
 		], token);
+		await runCommand("node", [
+			"tests/hardening-worker.mjs",
+		], token);
 	} catch (err) {
 		if (output.trim()) {
 			console.error("\n[wrangler output]");
