@@ -1,17 +1,30 @@
 import * as Y from "yjs";
 import { YServer } from "y-partyserver";
+import { runSerialized, runSingleFlight } from "./asyncConcurrency";
 import { ChunkedDocStore } from "./chunkedDocStore";
+import { readRoomMeta, type RoomMeta, writeRoomMeta } from "./roomMeta";
+import {
+	createSnapshot,
+	hasSnapshotForDay,
+	type SnapshotResult,
+} from "./snapshot";
+import {
+	appendTraceEntry,
+	listRecentTraceEntries,
+	prepareTraceEntryForStorage,
+	type TraceEntry as StoredTraceEntry,
+} from "./traceStore";
 
-const DEBUG_TRACE_RING_KEY = "debugTraceRing";
 const MAX_DEBUG_TRACE_EVENTS = 200;
 const JOURNAL_COMPACT_MAX_ENTRIES = 50;
 const JOURNAL_COMPACT_MAX_BYTES = 1 * 1024 * 1024;
+const TRACE_DEBUG_LIMIT = 100;
+const LOG_PREFIX = "[yaos-sync:server]";
 
-interface ServerTraceEntry {
-	ts: string;
-	event: string;
-	roomId: string;
-	[key: string]: unknown;
+interface ServerTraceEntry extends StoredTraceEntry {}
+
+interface ServerEnv {
+	YAOS_BUCKET?: R2Bucket;
 }
 
 function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
@@ -38,10 +51,13 @@ export class VaultSyncServer extends YServer {
 	};
 
 	private documentLoaded = false;
+	private loadPromise: Promise<void> | null = null;
 	private roomIdHint: string | null = null;
 	private chunkedDocStore: ChunkedDocStore | null = null;
 	private saveChain: Promise<void> = Promise.resolve();
+	private snapshotMaybeChain: Promise<void> = Promise.resolve();
 	private lastSavedStateVector: Uint8Array | null = null;
+	private roomMeta: RoomMeta | null = null;
 
 	async onLoad(): Promise<void> {
 		await this.ensureDocumentLoaded();
@@ -61,14 +77,22 @@ export class VaultSyncServer extends YServer {
 			return;
 		}
 		await this.enqueueSave(delta, persistedStateVector);
+		await this.syncRoomMetaFromDocument();
 	}
 
 	async fetch(request: Request): Promise<Response> {
 		this.captureRoomIdHint(request);
-		await this.ensureDocumentLoaded();
 
 		const url = new URL(request.url);
+		if (request.method === "GET" && url.pathname === "/__yaos/meta") {
+			return json({
+				roomId: this.getRoomId(),
+				meta: await this.readRoomMetaCheap(),
+			});
+		}
+
 		if (request.method === "GET" && url.pathname === "/__yaos/document") {
+			await this.ensureDocumentLoaded();
 			return new Response(Y.encodeStateAsUpdate(this.document), {
 				headers: {
 					"Content-Type": "application/octet-stream",
@@ -78,22 +102,20 @@ export class VaultSyncServer extends YServer {
 		}
 
 		if (request.method === "GET" && url.pathname === "/__yaos/debug") {
-			const recent =
-				(await this.ctx.storage.get<ServerTraceEntry[]>(DEBUG_TRACE_RING_KEY))
-				?? [];
+			const recent = await listRecentTraceEntries(this.ctx.storage, TRACE_DEBUG_LIMIT);
 			return json({
 				roomId: this.getRoomId(),
 				recent,
 			});
 		}
 
-			if (request.method === "POST" && url.pathname === "/__yaos/trace") {
-				let body: { event?: string; data?: Record<string, unknown> } = {};
-				try {
-					body = await request.json();
-				} catch {
-					return json({ error: "invalid json" }, 400);
-				}
+		if (request.method === "POST" && url.pathname === "/__yaos/trace") {
+			let body: { event?: string; data?: Record<string, unknown> } = {};
+			try {
+				body = await request.json();
+			} catch {
+				return json({ error: "invalid json" }, 400);
+			}
 
 			if (!body.event || typeof body.event !== "string") {
 				return json({ error: "missing event" }, 400);
@@ -103,40 +125,63 @@ export class VaultSyncServer extends YServer {
 			return json({ ok: true });
 		}
 
+		if (request.method === "POST" && url.pathname === "/__yaos/snapshot-maybe") {
+			await this.ensureDocumentLoaded();
+			let body: { device?: string } = {};
+			try {
+				body = await request.json();
+			} catch {
+				body = {};
+			}
+			return json(await this.createDailySnapshotMaybe(body.device));
+		}
+
+		await this.ensureDocumentLoaded();
 		return super.fetch(request);
 	}
 
 	private async ensureDocumentLoaded(): Promise<void> {
 		if (this.documentLoaded) return;
+		const gate = { inFlight: this.loadPromise };
+		const run = runSingleFlight(gate, async () => {
+			if (this.documentLoaded) return;
 
-		const state = await this.getChunkedDocStore().loadState();
-		await this.recordTrace("checkpoint-load", {
-			hasCheckpoint: state.checkpoint !== null,
-			checkpointStateVectorBytes: state.checkpointStateVector?.byteLength ?? 0,
-			journalEntryCount: state.journalStats.entryCount,
-			journalBytes: state.journalStats.totalBytes,
-			replayMode:
-				state.checkpoint !== null && state.journalUpdates.length > 0
-					? "checkpoint+journal"
-					: state.checkpoint !== null
-						? "checkpoint-only"
-						: state.journalUpdates.length > 0
-							? "journal-only"
-							: "empty",
+			const state = await this.getChunkedDocStore().loadState();
+			if (state.checkpoint) {
+				Y.applyUpdate(this.document, state.checkpoint);
+			}
+			for (const update of state.journalUpdates) {
+				Y.applyUpdate(this.document, update);
+			}
+
+			this.lastSavedStateVector = (
+				state.checkpointStateVector && state.journalUpdates.length === 0
+			)
+				? state.checkpointStateVector.slice()
+				: Y.encodeStateVector(this.document);
+			this.documentLoaded = true;
+			await this.syncRoomMetaFromDocument();
+			await this.recordTrace("checkpoint-load", {
+				hasCheckpoint: state.checkpoint !== null,
+				checkpointStateVectorBytes: state.checkpointStateVector?.byteLength ?? 0,
+				journalEntryCount: state.journalStats.entryCount,
+				journalBytes: state.journalStats.totalBytes,
+				replayMode:
+					state.checkpoint !== null && state.journalUpdates.length > 0
+						? "checkpoint+journal"
+						: state.checkpoint !== null
+							? "checkpoint-only"
+							: state.journalUpdates.length > 0
+								? "journal-only"
+								: "empty",
+			});
 		});
-		if (state.checkpoint) {
-			Y.applyUpdate(this.document, state.checkpoint);
+		this.loadPromise = gate.inFlight;
+		try {
+			await run;
+		} finally {
+			this.loadPromise = gate.inFlight;
 		}
-		for (const update of state.journalUpdates) {
-			Y.applyUpdate(this.document, update);
-		}
-
-		this.lastSavedStateVector = (
-			state.checkpointStateVector && state.journalUpdates.length === 0
-		)
-			? state.checkpointStateVector.slice()
-			: Y.encodeStateVector(this.document);
-		this.documentLoaded = true;
 	}
 
 	private getChunkedDocStore(): ChunkedDocStore {
@@ -174,30 +219,111 @@ export class VaultSyncServer extends YServer {
 		return run;
 	}
 
+	private async readRoomMetaCheap(): Promise<RoomMeta | null> {
+		const stored = await readRoomMeta(this.ctx.storage);
+		if (stored) {
+			this.roomMeta = stored;
+		}
+		if (this.documentLoaded) {
+			const liveSchemaVersion = this.currentSchemaVersion();
+			if (!this.roomMeta || this.roomMeta.schemaVersion !== liveSchemaVersion) {
+				const nextMeta: RoomMeta = {
+					schemaVersion: liveSchemaVersion,
+					updatedAt: new Date().toISOString(),
+				};
+				this.roomMeta = nextMeta;
+				void this.syncRoomMetaFromDocument();
+			}
+		}
+		return this.roomMeta;
+	}
+
+	private currentSchemaVersion(): number | null {
+		const stored = this.document.getMap("sys").get("schemaVersion");
+		if (typeof stored === "number" && Number.isInteger(stored) && stored >= 0) {
+			return stored;
+		}
+		return null;
+	}
+
+	private async syncRoomMetaFromDocument(): Promise<void> {
+		const nextSchemaVersion = this.currentSchemaVersion();
+		if (this.roomMeta && this.roomMeta.schemaVersion === nextSchemaVersion) {
+			return;
+		}
+		const nextMeta: RoomMeta = {
+			schemaVersion: nextSchemaVersion,
+			updatedAt: new Date().toISOString(),
+		};
+		try {
+			await writeRoomMeta(this.ctx.storage, nextMeta);
+			this.roomMeta = nextMeta;
+		} catch (err) {
+			console.error(`${LOG_PREFIX} room meta persist failed:`, err);
+		}
+	}
+
+	private async createDailySnapshotMaybe(
+		triggeredBy?: string,
+	): Promise<SnapshotResult> {
+		const serialized = { chain: this.snapshotMaybeChain };
+		const run = runSerialized(
+			serialized,
+			async () => {
+				const bucket = (this.env as ServerEnv).YAOS_BUCKET;
+				if (!bucket) {
+					return {
+						status: "unavailable",
+						reason: "R2 bucket not configured",
+					} satisfies SnapshotResult;
+				}
+
+				const currentDay = new Date().toISOString().slice(0, 10);
+				if (await hasSnapshotForDay(this.getRoomId(), currentDay, bucket)) {
+					return {
+						status: "noop",
+						reason: `Snapshot already taken today (${currentDay})`,
+					} satisfies SnapshotResult;
+				}
+
+				const index = await createSnapshot(
+					this.document,
+					this.getRoomId(),
+					bucket,
+					triggeredBy,
+				);
+				return {
+					status: "created",
+					snapshotId: index.snapshotId,
+					index,
+				} satisfies SnapshotResult;
+			},
+		);
+		this.snapshotMaybeChain = serialized.chain;
+		return await run;
+	}
+
 	private async recordTrace(
 		event: string,
 		data: Record<string, unknown>,
 	): Promise<void> {
-		const entry: ServerTraceEntry = {
+		const entry = prepareTraceEntryForStorage({
+			...data,
 			ts: new Date().toISOString(),
 			event,
 			roomId: this.getRoomId(),
-			...data,
-		};
+		}) as ServerTraceEntry;
 
-			console.debug(JSON.stringify({
-				source: "vault-sync",
-				...entry,
-			}));
+		console.debug(JSON.stringify({
+			source: "yaos-sync/server",
+			...entry,
+		}));
 
-		const existing =
-			(await this.ctx.storage.get<ServerTraceEntry[]>(DEBUG_TRACE_RING_KEY))
-			?? [];
-		existing.push(entry);
-		if (existing.length > MAX_DEBUG_TRACE_EVENTS) {
-			existing.splice(0, existing.length - MAX_DEBUG_TRACE_EVENTS);
+		try {
+			await appendTraceEntry(this.ctx.storage, entry, MAX_DEBUG_TRACE_EVENTS);
+		} catch (err) {
+			console.error(`${LOG_PREFIX} trace persist failed:`, err);
 		}
-		await this.ctx.storage.put(DEBUG_TRACE_RING_KEY, existing);
 	}
 
 	private getRoomId(): string {
