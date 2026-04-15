@@ -96,7 +96,6 @@ const FAST_RECONNECT_MIN_INTERVAL_MS = 2_000;
 const MARKDOWN_DIRTY_SETTLE_MS = 350;
 const OPEN_FILE_EXTERNAL_EDIT_IDLE_GRACE_MS = 1200;
 const BOUND_RECOVERY_LOCK_MS = 1500;
-const FRONTMATTER_GUARD_NOTICE_MS = 30_000;
 const CAPABILITY_REFRESH_INTERVAL_MS = 30_000;
 const UPDATE_MANIFEST_URLS = [
 	"https://github.com/kavinsood/yaos/releases/latest/download/update-manifest.json",
@@ -294,7 +293,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	private legacyServerNoticeShown = false;
 	private commandsRegistered = false;
 	private idbDegradedHandled = false;
-	private frontmatterGuardNoticeAt = new Map<string, number>();
+	private frontmatterGuardNoticeFingerprints = new Map<string, string>();
 	private frontmatterQuarantineEntries: FrontmatterQuarantineEntry[] = [];
 
 	/**
@@ -1149,7 +1148,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				return;
 			}
 
-			const repaired = this.editorBindings?.heal(
+			const repaired = this.editorBindings?.repair(
 				leaf.view,
 				this.settings.deviceName,
 				`validate:${reason}`,
@@ -2210,11 +2209,24 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		nextContent: string,
 	): void {
 		if (validation.risk === "ok") {
+			this.clearFrontmatterNoticeFingerprint(path, direction);
 			void this.clearFrontmatterQuarantine(path, `${direction}:${reason}`);
 			return;
 		}
 
 		if (!isFrontmatterBlocked(validation)) return;
+
+		const noticeFingerprint = this.buildFrontmatterNoticeFingerprint(
+			validation,
+			previousContent,
+			nextContent,
+		);
+		const shouldNotify = this.shouldNotifyFrontmatterQuarantine(
+			path,
+			direction,
+			noticeFingerprint,
+		);
+		const notifiedAt = shouldNotify ? Date.now() : null;
 
 		this.traceFrontmatterQuarantine(
 			path,
@@ -2224,25 +2236,62 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			previousContent?.length ?? null,
 			nextContent.length,
 		);
-		this.showFrontmatterGuardNotice(path, direction);
-		void this.persistFrontmatterQuarantine(path, direction, validation, previousContent, nextContent);
+		if (shouldNotify) {
+			this.showFrontmatterGuardNotice(path);
+		}
+		void this.persistFrontmatterQuarantine(
+			path,
+			direction,
+			validation,
+			previousContent,
+			nextContent,
+			noticeFingerprint,
+			notifiedAt,
+		);
 	}
 
-	private showFrontmatterGuardNotice(
-		path: string,
-		direction: "disk-to-crdt" | "crdt-to-disk",
-	): void {
-		const key = `${direction}:${path}`;
-		const now = Date.now();
-		if ((this.frontmatterGuardNoticeAt.get(key) ?? 0) + FRONTMATTER_GUARD_NOTICE_MS > now) {
-			return;
-		}
-
-		this.frontmatterGuardNoticeAt.set(key, now);
+	private showFrontmatterGuardNotice(path: string): void {
 		new Notice(
 			`YAOS paused a properties update in "${path}" because the frontmatter looked unsafe. Check diagnostics before accepting the change.`,
 			12_000,
 		);
+	}
+
+	private buildFrontmatterNoticeFingerprint(
+		validation: FrontmatterValidationResult,
+		previousContent: string | null,
+		nextContent: string,
+	): string {
+		const reasons = [...validation.reasons].sort().join("|");
+		return [
+			reasons,
+			String(validation.previousFrontmatterLength ?? "none"),
+			String(validation.frontmatterLength ?? "none"),
+			String(previousContent?.length ?? "none"),
+			String(nextContent.length),
+		].join("#");
+	}
+
+	private shouldNotifyFrontmatterQuarantine(
+		path: string,
+		direction: "disk-to-crdt" | "crdt-to-disk",
+		noticeFingerprint: string,
+	): boolean {
+		const key = `${direction}:${path}`;
+		const previousFingerprint = this.frontmatterGuardNoticeFingerprints.get(key);
+		if (previousFingerprint === noticeFingerprint) {
+			return false;
+		}
+		this.frontmatterGuardNoticeFingerprints.set(key, noticeFingerprint);
+		return true;
+	}
+
+	private clearFrontmatterNoticeFingerprint(
+		path: string,
+		direction: "disk-to-crdt" | "crdt-to-disk",
+	): void {
+		const key = `${direction}:${path}`;
+		this.frontmatterGuardNoticeFingerprints.delete(key);
 	}
 
 	private traceFrontmatterQuarantine(
@@ -2272,6 +2321,8 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		validation: FrontmatterValidationResult,
 		previousContent: string | null,
 		nextContent: string,
+		lastNotifiedFingerprint: string,
+		lastNoticeAt: number | null,
 	): Promise<void> {
 		const now = Date.now();
 		const prevHash = await this.hashFrontmatterContent(previousContent);
@@ -2286,6 +2337,8 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				reasons: validation.reasons,
 				prevHash,
 				nextHash,
+				lastNotifiedFingerprint,
+				lastNoticeAt: lastNoticeAt ?? undefined,
 				count: 1,
 			},
 		);
